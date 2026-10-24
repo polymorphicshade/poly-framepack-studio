@@ -1,3 +1,6 @@
+# imageio-ffmpeg 0.4.8 imports pkg_resources, which setuptools 81+ no longer ships (and which
+# fresh Python 3.12 virtual environments do not include at all)
+setuptools<81
 accelerate==1.6.0
 av==12.1.0
 decord

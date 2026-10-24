@@ -30,7 +30,7 @@ RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} --in
 # basicsr (for the ESRGAN upscaler) is only an sdist and lists torch in setup_requires. Built in
 # pip's usual isolated environment it would fetch a second, CPU-only torch, so build it against
 # the one above instead.
-RUN pip install setuptools wheel cython numpy==1.26.2 \
+RUN pip install "setuptools<81" wheel cython numpy==1.26.2 \
     && pip install --no-build-isolation basicsr
 
 COPY requirements.txt /tmp/requirements.txt
