@@ -6,6 +6,7 @@ import einops
 import numpy as np
 import torch
 import datetime
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 from diffusers_helper.models.mag_cache import MagCache
@@ -718,6 +719,8 @@ def worker(
 
         # --- Main generation loop ---
         # `i_section_loop` will be our loop counter for applying end_frame_latent
+        mp4_writer = ThreadPoolExecutor(max_workers=1)
+        pending_mp4_save = None
         for i_section_loop, latent_padding in enumerate(latent_paddings): # Existing loop structure
             is_last_section = latent_padding == 0
             latent_padding_size = latent_padding * latent_window_size
@@ -930,9 +933,22 @@ def worker(
                 unload_complete_models()
 
             output_filename = os.path.join(output_dir, f'{job_id}_{total_generated_latent_frames}.mp4')
-            save_bcthw_as_mp4(history_pixels, output_filename, fps=30, crf=settings.get("mp4_crf"))
             print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
-            stream_to_use.output_queue.push(('file', output_filename))
+
+            # Encode intermediate previews in the background so the GPU can start the next
+            # section right away. history_pixels is replaced (not mutated) each section, so
+            # handing the current tensor to the writer thread is safe.
+            def _save_and_push(pixels, filename, crf):
+                save_bcthw_as_mp4(pixels, filename, fps=30, crf=crf)
+                stream_to_use.output_queue.push(('file', filename))
+
+            if pending_mp4_save is not None:
+                pending_mp4_save.result()
+            if is_last_section:
+                pending_mp4_save = None
+                _save_and_push(history_pixels, output_filename, settings.get("mp4_crf"))
+            else:
+                pending_mp4_save = mp4_writer.submit(_save_and_push, history_pixels, output_filename, settings.get("mp4_crf"))
 
             if is_last_section:
                 break
@@ -942,6 +958,8 @@ def worker(
             # We'll handle combining the videos after the entire generation is complete
             # This section intentionally left empty to remove the in-process combination
             # --- END Main generation loop ---
+
+        mp4_writer.shutdown(wait=True)
 
         magcache = studio_module.current_generator.transformer.magcache
         if magcache is not None:

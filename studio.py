@@ -137,6 +137,12 @@ else:
     if 'HF_HUB_OFFLINE' in os.environ:
         del os.environ['HF_HUB_OFFLINE']
 
+# Allow TF32 for any fp32 matmuls/convs and let cuDNN pick the fastest conv algorithms
+# (latent/frame shapes are fixed within a job, so autotuning pays off).
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+
 free_mem_gb = get_cuda_free_memory_gb(gpu)
 high_vram = free_mem_gb > 60
 
