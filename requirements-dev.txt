@@ -1,0 +1,4 @@
+# Test tools. The API tests (tests/test_api.py) need only these, fastapi, numpy and pillow; no GPU,
+# torch or model weights.
+pytest
+httpx

@@ -3,7 +3,7 @@
 #   cp .env.https.example .env      # put the host's LAN address in the certificate
 #   mkdir -p loras                  # so the LoRA folder is owned by you, not root
 #   docker compose -f docker-compose.https.yml up -d --build
-#   https://<host>:8443
+#   https://<host>:8443           (HTTP API at /api, docs at /docs)
 #
 # HTTPS is port 8443, not 7860. 7860 is the app's own plain HTTP listener and is
 # published on 127.0.0.1 only; pointing a browser at https://<host>:7860 gets
@@ -67,7 +67,7 @@ services:
     # Goes through nginx to the app, so it passes once both are up (the app's
     # first boot downloads weights for a while). -k: the cert is self-signed.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsSk https://127.0.0.1/gradio_api/queue/status >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsSk https://127.0.0.1/api/health >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

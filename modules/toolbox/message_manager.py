@@ -9,6 +9,8 @@ class MessageManager:
         self._max_messages = max_messages
         self._message_queue = queue.Queue()
         self._lock = threading.Lock()
+        # Callables given (message_type, formatted_message) for every new message (used by the HTTP API).
+        self._listeners = []
         
         # ANSI-style formatting for different message types
         self._formats = {
@@ -34,6 +36,18 @@ class MessageManager:
             self._messages.append(formatted_message)
             if len(self._messages) > self._max_messages:
                 self._messages.pop(0)
+            listeners = list(self._listeners)
+        for listener in listeners:
+            listener(message_type, formatted_message)
+
+    def add_listener(self, listener) -> None:
+        with self._lock:
+            self._listeners.append(listener)
+
+    def remove_listener(self, listener) -> None:
+        with self._lock:
+            if listener in self._listeners:
+                self._listeners.remove(listener)
 
     def _format_path(self, message: str) -> str:
         """Format file paths to be more concise and readable."""

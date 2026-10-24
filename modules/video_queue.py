@@ -77,6 +77,7 @@ class Job:
     generation_type: Optional[str] = None # Added generation_type
     input_image_saved: bool = False  # Flag to track if input image has been saved
     end_frame_image_saved: bool = False  # Flag to track if end frame image has been saved
+    output_id: Optional[str] = None  # The worker's timestamp ID that names the output video, PNG and JSON
 
     def __post_init__(self):
         # Store generation type
@@ -1498,6 +1499,16 @@ class VideoJobQueue:
                                 with self.lock:
                                     job.result = output_filename
                             
+                            elif flag == 'job_id':
+                                with self.lock:
+                                    job.output_id = data
+
+                            elif flag == 'error':
+                                # The worker reports the traceback, then still sends 'end'; keep its last line.
+                                lines = str(data).strip().splitlines()
+                                with self.lock:
+                                    job.error = lines[-1] if lines else "Generation failed"
+
                             elif flag == 'progress':
                                 preview, desc, html = data
                                 with self.lock:
@@ -1535,7 +1546,9 @@ class VideoJobQueue:
                     with self.lock:
                         # Make sure we properly clean up the job state
                         if job.status == JobStatus.RUNNING:
-                            if job_completed:
+                            if job.error:
+                                job.status = JobStatus.FAILED
+                            elif job_completed:
                                 job.status = JobStatus.COMPLETED
                             else:
                                 # Something went wrong but we didn't mark it as completed

@@ -3,7 +3,7 @@
 #   cp .env.example .env      # optional: port, LoRA folder, serve flags, ...
 #   mkdir -p loras            # so the LoRA folder is owned by you, not root
 #   docker compose up -d --build
-#   http://<host>:7860
+#   http://<host>:7860            (HTTP API at /api, docs at /docs)
 #
 # For HTTPS, use docker-compose.https.yml instead.
 

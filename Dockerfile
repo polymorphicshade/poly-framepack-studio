@@ -1,4 +1,4 @@
-# poly-framepack-studio: the Gradio web UI on an NVIDIA GPU.
+# poly-framepack-studio: the Gradio web UI and HTTP API on an NVIDIA GPU.
 #
 # The PyTorch CUDA wheels bundle the CUDA runtime, so a slim Python base is enough. The host
 # only needs the NVIDIA driver and the NVIDIA Container Toolkit. Model weights are not baked in:
@@ -71,9 +71,9 @@ VOLUME ["/data", "/data/cache", "/data/outputs"]
 EXPOSE 7860
 
 # The first boot downloads the HunyuanVideo text encoders, VAE and image encoder (tens of GB)
-# before the server starts listening, hence the long start period. /gradio_api/queue/status is a small JSON response; "/" renders the whole UI config.
+# before the server starts listening, hence the long start period.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30m --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/gradio_api/queue/status', timeout=4)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/api/health', timeout=4)"
 
 # Extra studio.py flags (e.g. "--offline" or "--lora my_lora.safetensors") go in FRAMEPACK_SERVE_ARGS.
 CMD ["sh", "-c", "exec python /app/studio.py --server 0.0.0.0 --port 7860 $FRAMEPACK_SERVE_ARGS"]

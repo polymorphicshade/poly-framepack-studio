@@ -322,7 +322,7 @@ def get_cached_or_encode_prompt(prompt, text_encoder, text_encoder_2, tokenizer,
 job_queue.set_worker_function(worker)
 
 
-def process(
+def add_generation_job(
         model_type,
         input_image,
         end_frame_image,     # NEW
@@ -352,9 +352,11 @@ def process(
         input_image_path,
         combine_with_source,
         num_cleaned_frames,
-        *lora_args,
+        lora_loaded_names=None,  # every LoRA name, in the order of lora_values
+        lora_values=None,  # one weight per name in lora_loaded_names
         save_metadata_checked=True,  # NEW: Parameter to control metadata saving
     ):
+    """Queue a generation job (shared by the UI and the HTTP API) and return its ID."""
     
     # Create a blank black image if no 
     # Create a default image based on the selected latent_type
@@ -417,9 +419,8 @@ def process(
         except Exception as e:
             print(f"Error copying end frame image: {e}")
     
-    # Extract lora_loaded_names from lora_args
-    lora_loaded_names = lora_args[0] if lora_args and len(lora_args) > 0 else []
-    lora_values = lora_args[1:] if lora_args and len(lora_args) > 1 else []
+    lora_loaded_names = list(lora_loaded_names or [])
+    lora_values = list(lora_values or [])
     
     # Create job parameters
     job_params = {
@@ -477,8 +478,21 @@ def process(
     if job:
         job.generation_type = model_type  # Set generation_type to model_type for display in queue
     print(f"Added job {job_id} to queue")
-    
-    queue_status = update_queue_status()
+    return job_id
+
+
+def process(*args, save_metadata_checked=True):
+    """The UI's entry point: add_generation_job's arguments up to num_cleaned_frames, then the
+    LoRA names followed by one slider value per LoRA."""
+    n = add_generation_job.__code__.co_argcount - 3  # the parameters before lora_loaded_names
+    lora_args = args[n:]
+    job_id = add_generation_job(
+        *args[:n],
+        lora_loaded_names=lora_args[0] if lora_args else [],
+        lora_values=lora_args[1:],
+        save_metadata_checked=save_metadata_checked,
+    )
+    update_queue_status()
     # Return immediately after adding to queue
     # Return separate updates for start_button and end_button to prevent cross-contamination
     return None, job_id, None, '', f'Job added to queue. Job ID: {job_id}', gr.update(value="🚀 Add to Queue", interactive=True), gr.update(value="❌ Cancel Current Job", interactive=True)
@@ -703,6 +717,30 @@ interface = create_interface(
     lora_names=lora_names # Explicitly pass the found LoRA names
 )
 
+# The HTTP API (modules/api.py), served at /api by the same server as the UI and sharing its job
+# queue. Its interactive docs are at /api/docs; /docs redirects there.
+from starlette.responses import RedirectResponse
+from starlette.routing import Mount, Route
+from modules.api import create_api
+from modules.llm_captioner import caption_image
+from modules.llm_enhancer import enhance_prompt
+from modules.toolbox_app import tb_processor
+
+api = create_api(
+    job_queue=job_queue,
+    submit_generation=add_generation_job,
+    settings=settings,
+    lora_names=lora_names,
+    toolbox=tb_processor,
+    enhance_prompt=enhance_prompt,
+    caption_image=caption_image,
+    loaded_model=lambda: current_generator.get_model_name() if current_generator else None,
+)
+api_routes = [
+    Mount("/api", app=api),
+    Route("/docs", lambda request: RedirectResponse(url="api/docs")),
+]
+
 # Launch the interface
 interface.launch(
     server_name=args.server,
@@ -710,4 +748,6 @@ interface.launch(
     share=args.share,
     inbrowser=args.inbrowser,
     allowed_paths=[settings.get("output_dir"), settings.get("metadata_dir")],
+    # Routes given to the app's constructor come before Gradio's own.
+    app_kwargs={"routes": api_routes},
 )
