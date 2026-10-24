@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from modules import DUMMY_LORA_NAME, paths
+from modules.last_frame import extract_last_frame
 from modules.api_jobs import (MEDIA_TYPES, TERMINAL, ToolResult, ToolWorker, describe_queue_job, encode_preview,
                               queue_files, queue_status)
 from modules.version import APP_NAME, APP_VERSION
@@ -673,8 +674,8 @@ def create_api(
             raise HTTPException(404, "No preview yet")
         return Response(encode_preview(preview), media_type="image/png", headers={"Cache-Control": "no-store"})
 
-    @app.get("/jobs/{job_id}/videos/{index}", summary="A result video (while a generation runs: the video so far)")
-    def job_video(job_id: str, index: int, download: bool = False):
+    def job_video_info(job_id: str, index: int) -> tuple[str, str]:
+        """The path of a job's result video and the kind of job, or a 404."""
         job = job_queue.get_job(job_id)
         if job is not None:
             videos = [job.result] if job.result and os.path.isfile(job.result) else []
@@ -686,10 +687,29 @@ def create_api(
             videos, kind = tool_job.videos, tool_job.kind
         if not 0 <= index < len(videos):
             raise HTTPException(404, "No such video")
-        path = videos[index]
+        return videos[index], kind
+
+    def job_video_path(job_id: str, index: int) -> str:
+        return job_video_info(job_id, index)[0]
+
+    @app.get("/jobs/{job_id}/videos/{index}", summary="A result video (while a generation runs: the video so far)")
+    def job_video(job_id: str, index: int, download: bool = False):
+        path, kind = job_video_info(job_id, index)
         ext = os.path.splitext(path)[1].lower()
         return FileResponse(path, media_type=MEDIA_TYPES.get(ext, "application/octet-stream"),
                             filename=f"{kind}-{job_id}-{index}{ext}" if download else None)
+
+    @app.get("/jobs/{job_id}/videos/{index}/last-frame", summary="The last frame of a result video (PNG)")
+    def job_last_frame(job_id: str, index: int, download: bool = False):
+        path = job_video_path(job_id, index)
+        try:
+            frame = extract_last_frame(path)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        buf = io.BytesIO()
+        Image.fromarray(frame).save(buf, format="PNG")
+        headers = {"Content-Disposition": f'attachment; filename="{job_id}-{index}-last-frame.png"'} if download else None
+        return Response(buf.getvalue(), media_type="image/png", headers=headers)
 
     @app.get("/jobs/{job_id}/files/{name}", summary="A side output: 'metadata' (JSON) or 'image' (the start frame)")
     def job_file(job_id: str, name: str, download: bool = False):

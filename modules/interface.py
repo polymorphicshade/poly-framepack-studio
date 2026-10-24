@@ -32,6 +32,7 @@ from diffusers_helper.gradio.progress_bar import make_progress_bar_css, make_pro
 from diffusers_helper.bucket_tools import find_nearest_bucket
 from modules.pipelines.metadata_utils import create_metadata
 from modules import DUMMY_LORA_NAME # Import the constant
+from modules.last_frame import save_last_frame
 
 from modules.toolbox_app import tb_processor
 from modules.toolbox_app import tb_create_video_toolbox_ui, tb_get_formatted_toolbar_stats
@@ -523,6 +524,8 @@ def create_interface(
                             image_mode="RGB"
                         )
                         result_video = gr.Video(label="Finished Frames", autoplay=True, show_share_button=False, height=256, loop=True)
+                        with gr.Row():
+                            download_last_frame_btn = gr.DownloadButton("💾 Download Last Frame", interactive=False, size="sm")
                         progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
                         progress_bar = gr.HTML('', elem_classes='no-generating-animation')
                         with gr.Row():
@@ -1241,6 +1244,23 @@ def create_interface(
             else:
                 print(f"No valid video path (from State) found to send. Path: {original_path_from_state}")
                 return gr.update(), gr.update()
+
+        def update_last_frame_download(video_path):
+            """Prepare the last frame of the shown video for the download button."""
+            if not video_path:
+                return gr.update(value=None, interactive=False)
+            try:
+                return gr.update(value=save_last_frame(video_path), interactive=True)
+            except Exception as e:
+                print(f"Could not extract the last frame of {video_path}: {e}")
+                return gr.update(value=None, interactive=False)
+
+        result_video.change(
+            fn=update_last_frame_download,
+            inputs=[result_video],
+            outputs=[download_last_frame_btn],
+            show_progress="hidden",
+        )
 
         send_to_toolbox_btn.click(
             fn=handle_send_video_to_toolbox,

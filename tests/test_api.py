@@ -313,3 +313,19 @@ def test_dummy_lora_is_hidden(env, tmp_path):
     c = TestClient(app)
     assert c.get("/api/loras").json()["loras"] == ["only"]
     assert c.post("/api/upscale", files={"video": ("a.mp4", b"a", "video/mp4")}).status_code == 503
+
+
+def test_last_frame_of_a_result_video(env):
+    cv2 = pytest.importorskip("cv2")
+    body = env.client.post("/api/generate", data={"prompt": "a fox", "wait": "true"}).json()
+    video = env.queue.get_job(body["id"]).result
+    writer = cv2.VideoWriter(video, cv2.VideoWriter_fourcc(*"mp4v"), 8, (64, 48))
+    for shade in (0, 100, 200):
+        writer.write(np.full((48, 64, 3), shade, dtype=np.uint8))
+    writer.release()
+    r = env.client.get(f"/api/jobs/{body['id']}/videos/0/last-frame", params={"download": "true"})
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert "attachment" in r.headers["content-disposition"]
+    frame = np.array(Image.open(io.BytesIO(r.content)))
+    assert frame.shape == (48, 64, 3) and abs(int(frame.mean()) - 200) < 12
+    assert env.client.get(f"/api/jobs/{body['id']}/videos/5/last-frame").status_code == 404
