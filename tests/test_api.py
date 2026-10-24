@@ -343,3 +343,14 @@ def test_generate_from_the_last_frame_of_a_job(env):
     assert r.status_code == 200 and r.json()["status"] == "done"
     assert env.submitted[-1]["input_image"].shape == (48, 64, 3)
     assert env.client.post("/api/generate", data={"prompt": "x", "image_from_job": "nope"}).status_code == 404
+
+
+def test_generate_count_queues_several_jobs(env):
+    c = env.client
+    r = c.post("/api/generate", data={"prompt": "a fox", "seed": 10, "count": 3, "wait": "true"})
+    assert r.status_code == 200
+    jobs = r.json()["jobs"]
+    assert [j["seed"] for j in jobs] == [10, 11, 12] and all(j["status"] == "done" for j in jobs)
+    assert c.post("/api/generate", data={"prompt": "a fox", "count": 0}).status_code == 422
+    single = c.post("/api/generate", data={"prompt": "a fox", "count": 1, "wait": "true"}).json()
+    assert "jobs" not in single and single["status"] == "done"

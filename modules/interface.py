@@ -40,6 +40,17 @@ from modules.xy_plot_ui import create_xy_plot_ui, xy_plot_process
 
 # Define the dummy LoRA name as a constant
 
+MAX_GENERATION_COUNT = 100
+
+
+def clamp_generation_count(value) -> int:
+    """The number of jobs for one click of Add to Queue: a whole number from 1 to MAX_GENERATION_COUNT."""
+    try:
+        return max(1, min(MAX_GENERATION_COUNT, int(value)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def create_interface(
     process_fn,
     monitor_fn,
@@ -421,6 +432,10 @@ def create_interface(
                                 with gr.Row():
                                     seed = gr.Number(label="Seed", value=2500, precision=0)
                                     randomize_seed = gr.Checkbox(label="Randomize", value=True, info="Generate a new random seed for each job")
+                                generation_count = gr.Number(
+                                    label="Generation Count", value=1, minimum=1, maximum=MAX_GENERATION_COUNT, precision=0,
+                                    info="How many videos to queue with these settings. Each one gets its own seed (the next one, or a random one if Randomize is checked)."
+                                )
                             with gr.Accordion("LoRAs", open=False):
                                 with gr.Row():
                                     lora_selector = gr.Dropdown(
@@ -1324,8 +1339,21 @@ def create_interface(
 
         # --- Connect Buttons ---
         def handle_start_button(selected_model, *args):
-            # For other model types, use the regular process function
-            return process_with_queue_update(selected_model, *args)
+            *job_args, count = args
+            count = clamp_generation_count(count)
+            job_args = list(job_args)
+            # Queue `count` jobs; the seed is at index 6 of the ips list and randomize_seed at 7.
+            result = None
+            for i in range(count):
+                result = process_with_queue_update(selected_model, *job_args)
+                if i < count - 1:
+                    # process_with_queue_update returns the next random seed (or a no-op update) at index 9.
+                    next_seed = result[9] if job_args[7] and isinstance(result[9], int) else job_args[6] + 1
+                    job_args[6] = next_seed
+            # Show the seed the next click will start from.
+            if count > 1 and not job_args[7]:
+                result[9] = job_args[6] + 1
+            return result
         
         def handle_batch_add_to_queue(*args):
             # The last argument will be the list of files from batch_input_images
@@ -1407,12 +1435,12 @@ def create_interface(
         # Connect the start button to first update its state
         start_button.click(
             fn=update_button_before_processing,
-            inputs=[model_type] + ips,
+            inputs=[model_type] + ips + [generation_count],
             outputs=[result_video, current_job_id, preview_image, top_preview_image, progress_desc, progress_bar, start_button, end_button, queue_status, queue_stats_display, seed, video_input_required_message]
         ).then(
             # Then process the job
             fn=handle_start_button,
-            inputs=[model_type] + ips,
+            inputs=[model_type] + ips + [generation_count],
             outputs=[result_video, current_job_id, preview_image, progress_desc, progress_bar, start_button, end_button, queue_status, queue_stats_display, seed, video_input_required_message] # Added video_input_required_message
         ).then( # Ensure validation is re-checked after job processing completes
             fn=update_start_button_state,

@@ -386,6 +386,8 @@ def create_api(
         end_frame: UploadFile | None = File(None, description="Optional end frame (original only: 'Original with Endframe')"),
         end_frame_strength: float | None = Form(None, description=OPTIONS["end_frame_strength"][3]),
         latent_type: str | None = Form(None, description="Start without an image from: noise, white, black or green"),
+        count: int = Form(1, ge=1, le=100, description="How many videos to queue (seed, seed+1, ...); more than 1 returns {\"jobs\": [...]}"),
+        random_seeds: bool = Form(False, description="With count > 1: a new random seed per video instead of seed+1"),
         wait: bool = Form(False), opts: dict = Depends(generation_options),
     ):
         model = model.lower()
@@ -402,8 +404,11 @@ def create_api(
         model_type = "Original with Endframe" if end is not None else GENERATE_MODELS[model]
         given = opts | {k: v for k, v in (("end_frame_strength", end_frame_strength), ("latent_type", latent_type)) if v is not None}
         values = resolve(model_type, given)
-        job_id = await asyncio.to_thread(submit, model_type, values, img, end)
-        return await respond([job_id], wait)
+        job_ids = []
+        for i in range(count):
+            seed = random.randint(0, 2**31 - 1) if random_seeds and i else values["seed"] + (0 if random_seeds else i)
+            job_ids.append(await asyncio.to_thread(submit, model_type, values | {"seed": seed}, img, end))
+        return await respond(job_ids, wait, many=count > 1)
 
     @app.post("/extend", status_code=202, summary="Extend a video (Video / Video F1), optionally towards an end frame")
     async def extend(
