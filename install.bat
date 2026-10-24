@@ -2,39 +2,70 @@
 echo poly-framepack-studio Setup Script
 setlocal enabledelayedexpansion
 
-REM Check if Python is installed (basic check)
-where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Error: Python is not installed or not in your PATH. Please install Python and try again.
+REM The pinned requirements (numpy 1.26, scipy 1.12, av 12, sentencepiece 0.2) only have wheels
+REM for Python 3.10-3.12, so the virtual environment must use one of those, whatever "python" is.
+
+if exist "%cd%\.venv\Scripts\python.exe" (
+    "%cd%\.venv\Scripts\python.exe" -c "import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 12) else 1)" >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo Virtual Environment already exists.
+        set choice=
+        set /p choice= "Do you want to reinstall packages?[Y/N]: "
+        if /i "!choice!" == "y" goto checkgpu
+        goto end
+    )
+    echo The existing Virtual Environment in .venv uses an unsupported Python version:
+    "%cd%\.venv\Scripts\python.exe" -V
+    set choice=
+    set /p choice= "Delete it and create a new one with a supported Python?[Y/N]: "
+    if /i not "!choice!" == "y" goto end
+    rmdir /s /q "%cd%\.venv"
+)
+
+:findpython
+REM Prefer the newest supported version through the Python launcher, then "python" on PATH.
+set "PYEXE="
+for %%v in (3.12 3.11 3.10) do (
+    if not defined PYEXE (
+        for /f "delims=" %%p in ('py -%%v -c "import sys; print(sys.executable)" 2^>nul') do set "PYEXE=%%p"
+    )
+)
+if not defined PYEXE (
+    for /f "delims=" %%p in ('python -c "import sys; print(sys.executable if (3, 10) <= sys.version_info[:2] <= (3, 12) else '')" 2^>nul') do set "PYEXE=%%p"
+)
+if defined PYEXE goto makevenv
+
+echo No supported Python was found. poly-framepack-studio needs Python 3.10, 3.11 or 3.12
+echo ^(3.13 and newer cannot install its pinned packages^).
+if defined PYTHON_INSTALL_TRIED (
+    echo Python 3.12 was installed, but this window cannot see it yet. Close it and run install.bat again.
     goto end
 )
-
-if exist "%cd%/.venv" (
-echo Virtual Environment already exists. 
-set /p choice= "Do you want to reinstall packages?[Y/N]: "
-
-if "!choice!" == "y" (goto checkgpu)
-if "!choice!"=="Y" (goto checkgpu)
-
-goto end
+where winget >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Install Python 3.12 from https://www.python.org/downloads/ and run install.bat again.
+    goto end
 )
-
-REM Check the python version
-echo Python versions 3.10-3.12 have been confirmed to work. Other versions are currently not supported. You currently have:
-python -V
 set choice=
-set /p choice= "Do you want to continue?[Y/N]: "
-
-
-if "!choice!" == "y" (goto makevenv)
-if "!choice!"=="Y" (goto makevenv)
-
-goto end
+set /p choice= "Install Python 3.12 now with winget? It is installed alongside your other versions.[Y/N]: "
+if /i not "!choice!" == "y" (
+    echo Install Python 3.12 from https://www.python.org/downloads/ and run install.bat again.
+    goto end
+)
+winget install -e --id Python.Python.3.12
+set PYTHON_INSTALL_TRIED=1
+goto findpython
 
 :makevenv
+echo Using Python at %PYEXE%
+"%PYEXE%" -V
 REM This creates a virtual environment in the folder
 echo Creating a Virtual Environment...
-python -m venv .venv
+"%PYEXE%" -m venv .venv
+if %errorlevel% neq 0 (
+    echo Error: Could not create the Virtual Environment.
+    goto end
+)
 echo Upgrading pip in Virtual Environment to lower chance of error...
 "%cd%/.venv/Scripts/python.exe" -m pip install --upgrade pip
 
@@ -55,13 +86,8 @@ echo Detected %GPU_NAME%
 set "GPU_SERIES=%GPU_NAME:*RTX =%"
 set "GPU_SERIES=%GPU_SERIES:~0,2%00"
 
-REM This gets the shortened Python version for later use. e.g. 3.10.13 becomes 310.
-for /f "delims=" %%A in ('python -V') do set "pyv=%%A"
-for /f "tokens=2 delims= " %%A in ("%pyv%") do (
-    set pyv=%%A
-)
-set pyv=%pyv:.=%
-set pyv=%pyv:~0,3%
+REM The Virtual Environment's Python version for the wheel names below, e.g. 3.12.7 becomes 312.
+for /f "delims=" %%A in ('call "%cd%\.venv\Scripts\python.exe" -c "import sys; print(str(sys.version_info[0]) + str(sys.version_info[1]))"') do set "pyv=%%A"
 
 echo Installing torch...
 
@@ -119,8 +145,12 @@ if %pyv% == 312 (
 )
 	
 REM Extract the zip into the Python Folder and Delete zip
-powershell Expand-Archive -Path '%cd%\triton-lib.zip' -DestinationPath '%cd%\.venv\Scripts\' -force
-del triton-lib.zip
+if exist "%cd%\triton-lib.zip" (
+    powershell Expand-Archive -Path '%cd%\triton-lib.zip' -DestinationPath '%cd%\.venv\Scripts\' -force
+    del triton-lib.zip
+) else (
+    echo Warning: could not download the Python headers for triton-windows. A regular Python install already has them, so this is usually fine.
+)
 if %both% == "Y" (goto flash270)
 
 goto requirements
@@ -179,8 +209,12 @@ if %pyv% == 312 (
 )
 	
 REM Extract the zip into the Python Folder and Delete zip
-powershell Expand-Archive -Path '%cd%\triton-lib.zip' -DestinationPath '%cd%\.venv\Scripts\' -force
-del triton-lib.zip
+if exist "%cd%\triton-lib.zip" (
+    powershell Expand-Archive -Path '%cd%\triton-lib.zip' -DestinationPath '%cd%\.venv\Scripts\' -force
+    del triton-lib.zip
+) else (
+    echo Warning: could not download the Python headers for triton-windows. A regular Python install already has them, so this is usually fine.
+)
 
 if %both% == "Y" (goto flash260)
 

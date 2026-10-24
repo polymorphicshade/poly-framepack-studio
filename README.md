@@ -26,6 +26,7 @@ Every type runs in the same job queue, from the web UI or the [HTTP API](#http-a
 - An NVIDIA GPU with at least 8 GB VRAM (16 GB or more recommended).
 - 16 GB of system RAM (32 GB or more strongly recommended).
 - 80 GB of free disk space or more: about 25 GB for each model family (Original and F1), plus the shared text encoders.
+- Python 3.10, 3.11 or 3.12. Several pinned packages have no wheels for 3.13 or newer. `install.bat` finds a supported version itself, and if there is none it offers to install 3.12 with winget alongside your other versions.
 
 ## Install
 
