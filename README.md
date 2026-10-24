@@ -8,11 +8,13 @@ A video generation studio for [FramePack](https://github.com/lllyasviel/FramePac
 | **Original with Endframe** | Same, with an end frame whose influence you set. |
 | **F1** | The FramePack F1 model, which generates forwards in time. |
 | **Video**, **Video with Endframe**, **Video F1** | Extends an input video, optionally towards an end frame, and can join the result onto the source. |
+| **Sequence** | One video through 2 to 10 keyframes: each gap between neighbouring keyframes is its own Original with Endframe segment with its own prompt and length, and the segments are joined into one video. With **Seamless transitions** on, each segment starts from the frame the previous one actually ended on, so the joins have no jump. |
 
 Every type runs in the same job queue, from the web UI or the [HTTP API](#http-api). Other features:
 
 - **Timestamped prompts**: give different prompts for different times, e.g. `[1s: waves hello] [3s: jumps]`, and choose how many sections to blend between them.
 - **LoRAs**: works with most HunyuanVideo LoRAs, each with its own weight.
+- **Workspace tabs**: the Generate page has browser-style tabs (＋ to add, ✕ Close, type in the box to rename), each with its own generation type, prompts, settings and input images, so you can keep several ideas going and switch between them. Tabs and their settings are kept in your browser across reloads (images are not). All tabs share one job queue and one result panel.
 - **Queue**: jobs run one after another while you keep working. Queues can be exported to a zip and imported again.
 - **Metadata**: the prompt and seed are stored in the output PNG; all other settings go into a JSON file that can be loaded back later.
 - **Presets**: named groups of settings per generation type, plus a startup model and preset.
@@ -53,6 +55,7 @@ The API is served by the same server as the UI, at `/api`. Interactive docs are 
 | POST | `/api/generate` | `prompt`, `model` (`original`/`f1`), optional `image` (start frame), `end_frame` (original only), `end_frame_strength`, `latent_type` (`noise`/`white`/`black`/`green`, used without an image) |
 | POST | `/api/extend` | Video extension: `video` or `source_job`, `prompt`, `model` (`original` = Video, `f1` = Video F1), optional `end_frame`, `combine_with_source`, `context_frames` |
 | POST | `/api/batch` | `images[]`, one job each with the same settings; seeds count up from `seed` unless `random_seeds` |
+| POST | `/api/sequence` | `images[]` (2–10 keyframes, in order), `prompts` JSON list (one per segment; blank entries use `prompt`), `segment_seconds` JSON list (default: `seconds` each), `chain` (seamless joins, default true), `end_frame_strength` |
 | POST | `/api/enhance` · `/api/caption` | `prompt` → a more detailed prompt · `image` → a prompt describing it |
 | POST | `/api/postprocess` | `video` or `source_job`, `operations` JSON: a chain of `upscale`, `interpolate`, `filters`, `loop` and `export` steps |
 | POST | `/api/upscale` | Real-ESRGAN: `model`, `scale`, `tile`, `enhance_face` (GFPGAN), `denoise`, `streaming` |

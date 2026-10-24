@@ -62,6 +62,7 @@ from modules.settings import Settings
 from modules import DUMMY_LORA_NAME # Import the constant
 from modules.pipelines.metadata_utils import create_metadata
 from modules.pipelines.worker import worker
+from modules.sequence import MAX_SEQUENCE_IMAGES, plan_segments, save_keyframes
 
 # Try to suppress annoyingly persistent Windows asyncio proactor errors
 if os.name == 'nt':  # Windows only
@@ -355,10 +356,33 @@ def add_generation_job(
         lora_loaded_names=None,  # every LoRA name, in the order of lora_values
         lora_values=None,  # one weight per name in lora_loaded_names
         save_metadata_checked=True,  # NEW: Parameter to control metadata saving
+        *,
+        sequence_images=None,  # Sequence: two or more keyframes (numpy arrays), in order
+        sequence_prompts=None,  # Sequence: one prompt per segment; blank ones use prompt_text
+        sequence_seconds=None,  # Sequence: one length per segment; missing ones use total_second_length
+        chain_segments=True,  # Sequence: start each segment from the last frame of the one before
     ):
     """Queue a generation job (shared by the UI and the HTTP API) and return its ID."""
-    
-    # Create a blank black image if no 
+
+    sequence_params = {}
+    if model_type == "Sequence":
+        if not sequence_images or len(sequence_images) < 2:
+            raise ValueError("A sequence needs at least two keyframes")
+        if len(sequence_images) > MAX_SEQUENCE_IMAGES:
+            raise ValueError(f"A sequence takes at most {MAX_SEQUENCE_IMAGES} keyframes")
+        sequence_prompts, sequence_seconds = plan_segments(len(sequence_images) - 1, sequence_prompts, sequence_seconds, total_second_length)
+        sequence_params = {
+            'sequence_image_paths': save_keyframes(sequence_images, settings.get("input_files_dir"), generate_timestamp()),
+            'sequence_prompts': sequence_prompts,
+            'sequence_seconds': sequence_seconds,
+            'chain_segments': bool(chain_segments),
+        }
+        # The first keyframe stands in as the job's input image (queue thumbnail, metadata).
+        input_image = np.asarray(sequence_images[0])
+        end_frame_image = None
+        total_second_length = sum(sequence_seconds)
+
+    # Create a blank black image if no
     # Create a default image based on the selected latent_type
     has_input_image = True
     if input_image is None:
@@ -459,8 +483,9 @@ def add_generation_job(
         'combine_with_source': combine_with_source,  # Add combine_with_source parameter
         'num_cleaned_frames': num_cleaned_frames,
         'save_metadata_checked': save_metadata_checked,  # NEW: Add save_metadata_checked parameter
+        **sequence_params,
     }
-    
+
     # Print teacache parameters for debugging
     print(f"Teacache parameters: use_teacache={use_teacache}, teacache_num_steps={teacache_num_steps}, teacache_rel_l1_thresh={teacache_rel_l1_thresh}")
     
@@ -481,9 +506,10 @@ def add_generation_job(
     return job_id
 
 
-def process(*args, save_metadata_checked=True):
+def process(*args, save_metadata_checked=True, **sequence_options):
     """The UI's entry point: add_generation_job's arguments up to num_cleaned_frames, then the
-    LoRA names followed by one slider value per LoRA."""
+    LoRA names followed by one slider value per LoRA. A Sequence job also passes its keyword-only
+    sequence_* options."""
     n = add_generation_job.__code__.co_argcount - 3  # the parameters before lora_loaded_names
     lora_args = args[n:]
     job_id = add_generation_job(
@@ -491,6 +517,7 @@ def process(*args, save_metadata_checked=True):
         lora_loaded_names=lora_args[0] if lora_args else [],
         lora_values=lora_args[1:],
         save_metadata_checked=save_metadata_checked,
+        **sequence_options,
     )
     update_queue_status()
     # Return immediately after adding to queue

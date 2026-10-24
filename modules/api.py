@@ -28,6 +28,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from modules import DUMMY_LORA_NAME, paths
 from modules.last_frame import extract_last_frame
+from modules.sequence import MAX_SEQUENCE_IMAGES
 from modules.api_jobs import (MEDIA_TYPES, TERMINAL, ToolResult, ToolWorker, describe_queue_job, encode_preview,
                               queue_files, queue_status)
 from modules.version import APP_NAME, APP_VERSION
@@ -41,7 +42,7 @@ CACHES = ("magcache", "teacache", "none")
 
 # The FramePack checkpoints (one per model family) and the parts every family shares.
 MODEL_REPOS = {
-    "original": ("lllyasviel/FramePackI2V_HY", "Original, Original with Endframe, Video"),
+    "original": ("lllyasviel/FramePackI2V_HY", "Original, Original with Endframe, Video, Sequence"),
     "f1": ("lllyasviel/FramePack_F1_I2V_HY_20250503", "F1, Video F1"),
     "hunyuan": ("hunyuanvideo-community/HunyuanVideo", "Text encoders, tokenizers and VAE (all types)"),
     "flux_redux": ("lllyasviel/flux_redux_bfl", "SigLIP image encoder (all types)"),
@@ -174,7 +175,7 @@ def create_api(
     ``toolbox`` its post-processing VideoProcessor (post-processing endpoints are off without one).
     """
     app = FastAPI(title=APP_NAME, version=APP_VERSION, docs_url="/docs", redoc_url=None,
-                  description="FramePack video generation (Original, F1, endframes and video extension), the queue, "
+                  description="FramePack video generation (Original, F1, endframes, video extension and keyframe sequences), the queue, "
                               "and post-processing: upscaling, frame interpolation, filters, loops, joins and export.")
     tools = ToolWorker(toolbox) if toolbox is not None else None
     uploads = Path(settings.get("gradio_temp_dir") or paths.TEMP_DIR) / "api"
@@ -271,7 +272,8 @@ def create_api(
         values["loras"] = {n: _number(f"LoRA weight for {n}", w, 0.0, 2.0, False) for n, w in loras.items()}
         return values
 
-    def submit(model_type: str, values: dict, input_image=None, end_frame=None, video_path: str | None = None) -> str:
+    def submit(model_type: str, values: dict, input_image=None, end_frame=None, video_path: str | None = None,
+               **sequence) -> str:
         weights = values["loras"]
         return submit_generation(
             model_type=model_type,
@@ -307,6 +309,7 @@ def create_api(
             lora_loaded_names=list(lora_names),
             lora_values=[weights.get(n, 1.0) for n in lora_names],
             save_metadata_checked=values.get("save_metadata", True),
+            **sequence,
         )
 
     def describe(job_id: str) -> dict:
@@ -347,6 +350,7 @@ def create_api(
         return {
             "generate_models": list(GENERATE_MODELS), "extend_models": list(EXTEND_MODELS),
             "latent_types": list(LATENT_TYPES), "caches": list(CACHES),
+            "sequence": {"min_images": 2, "max_images": MAX_SEQUENCE_IMAGES},
             "options": {k: {"default": v[0], "min": v[1], "max": v[2], "description": v[3]} for k, v in OPTIONS.items()},
             "postprocess": {
                 "operations": list(POSTPROCESS_OPS), "upscale_models": upscale_models, "tile_sizes": list(TILE_SIZES),
@@ -457,6 +461,40 @@ def create_api(
             seed = random.randint(0, 2**31 - 1) if random_seeds and i else values["seed"] + (0 if random_seeds else i)
             job_ids.append(await asyncio.to_thread(submit, model_type, values | {"seed": seed}, img))
         return await respond(job_ids, wait, many=True)
+
+    @app.post("/sequence", status_code=202, summary="One video through two or more keyframes, a generated segment between each pair")
+    async def sequence(
+        images: list[UploadFile] = File(..., description=f"Keyframes in order, 2 to {MAX_SEQUENCE_IMAGES}"),
+        prompts: str | None = Form(None, description="JSON list, one prompt per segment (one fewer than images); "
+                                                     "blank entries use 'prompt'"),
+        segment_seconds: str | None = Form(None, description="JSON list, one length per segment; without it every segment is 'seconds' long"),
+        chain: bool = Form(True, description="Start each segment from the last frame the one before produced, so the joins "
+                                             "have no jump; false starts each segment exactly on its keyframe"),
+        end_frame_strength: float | None = Form(None, description="How strongly each next keyframe guides its segment"),
+        wait: bool = Form(False), opts: dict = Depends(generation_options),
+    ):
+        frames = [_read_image(u, "images") for u in images if u.filename]
+        if not 2 <= len(frames) <= MAX_SEQUENCE_IMAGES:
+            _bad(f"'images' needs 2 to {MAX_SEQUENCE_IMAGES} keyframes")
+        count = len(frames) - 1
+        segment_prompts = _json(prompts, "prompts")
+        if segment_prompts is not None and (not isinstance(segment_prompts, list) or len(segment_prompts) != count
+                                            or not all(isinstance(p, (str, type(None))) for p in segment_prompts)):
+            _bad(f"'prompts' must be a JSON list of {count} strings (one per segment)")
+        lengths = _json(segment_seconds, "segment_seconds")
+        if lengths is not None:
+            if not isinstance(lengths, list) or len(lengths) != count:
+                _bad(f"'segment_seconds' must be a JSON list of {count} numbers (one per segment)")
+            lo, hi = OPTIONS["seconds"][1:3]
+            lengths = [_number("segment_seconds", s, lo, hi, False) for s in lengths]
+        given = opts | ({"end_frame_strength": end_frame_strength} if end_frame_strength is not None else {})
+        # 'prompt' only fills in blank segment prompts, so it isn't needed when every segment has one.
+        if segment_prompts and all((p or "").strip() for p in segment_prompts) and not (given.get("prompt") or "").strip():
+            given["prompt"] = segment_prompts[0]
+        values = resolve("Sequence", given)
+        job_id = await asyncio.to_thread(submit, "Sequence", values, frames[0], sequence_images=frames,
+                                         sequence_prompts=segment_prompts, sequence_seconds=lengths, chain_segments=chain)
+        return await respond([job_id], wait)
 
     # ------------------------------------------------------------------ prompt helpers
 

@@ -50,7 +50,10 @@ def queue_status(job) -> str:
 def queue_kind(job) -> str:
     if getattr(job.job_type, "value", None) == "grid":
         return "grid"
-    return "extend" if job.params.get("model_type") in ("Video", "Video F1") else "generate"
+    model_type = job.params.get("model_type")
+    if model_type == "Sequence":
+        return "sequence"
+    return "extend" if model_type in ("Video", "Video F1") else "generate"
 
 
 def output_id(job) -> str | None:

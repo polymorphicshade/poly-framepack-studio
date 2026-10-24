@@ -31,6 +31,7 @@ def get_placeholder_color(model_type):
         "XY Plot": (128, 128, 0),        # Yellow
         "F1 with Endframe": (0, 128, 128),  # Teal
         "Original with Endframe": (128, 0, 128),  # Purple
+        "Sequence": (128, 64, 0),        # Brown
     }
     
     # Return the color for the model type, or black as default
@@ -219,6 +220,12 @@ def create_metadata(job_params, job_id, settings, save_placeholder=False):
         "y_param": job_params.get('y_param', None),
         "x_values": job_params.get('x_values', None),
         "y_values": job_params.get('y_values', None),
+
+        # Sequence-related parameters
+        "sequence_image_paths": job_params.get('sequence_image_paths', None),
+        "sequence_prompts": job_params.get('sequence_prompts', None),
+        "sequence_seconds": job_params.get('sequence_seconds', None),
+        "chain_segments": job_params.get('chain_segments', None),
 
         # Combine with source video
         "combine_with_source": job_params.get('combine_with_source', False),

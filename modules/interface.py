@@ -33,6 +33,8 @@ from diffusers_helper.bucket_tools import find_nearest_bucket
 from modules.pipelines.metadata_utils import create_metadata
 from modules import DUMMY_LORA_NAME # Import the constant
 from modules.last_frame import extract_last_frame, save_last_frame
+from modules.sequence import MAX_SEQUENCE_IMAGES, load_image, natural_key
+from modules import workspaces
 
 from modules.toolbox_app import tb_processor
 from modules.toolbox_app import tb_create_video_toolbox_ui, tb_get_formatted_toolbar_stats
@@ -266,6 +268,21 @@ def create_interface(
         # Essential to capture main_tabs_component for later use by send_to_toolbox_btn
         with gr.Tabs(elem_id="main_tabs") as main_tabs_component:
             with gr.Tab("Generate", id="generate_tab"):
+                # Workspace tabs: each keeps its own settings and input images (see modules/workspaces.py)
+                workspace_state = gr.State(workspaces.new_state())
+                workspace_browser_state = gr.BrowserState(None, storage_key=workspaces.STORAGE_KEY)
+                with gr.Row(elem_id="workspace-tabs", equal_height=True):
+                    workspace_selector = gr.Radio(
+                        choices=workspaces.choices(workspace_state.value), value="1", show_label=False, container=False,
+                        elem_classes="poly-modes", scale=8
+                    )
+                    workspace_new_btn = gr.Button("＋", size="sm", scale=0, min_width=48)
+                    workspace_name = gr.Textbox(
+                        value="Workspace 1", show_label=False, container=False, max_lines=1, scale=2, min_width=140,
+                        placeholder="Rename this workspace", info=None
+                    )
+                    workspace_close_btn = gr.Button("✕ Close", size="sm", scale=0, min_width=80)
+
                 # NEW: Top preview area for latents display
                 with gr.Row(visible=get_latents_display_top()) as top_preview_row:
                     top_preview_image = gr.Image(
@@ -281,7 +298,7 @@ def create_interface(
                 with gr.Row():
                     with gr.Column(scale=2, elem_classes="poly-controls"):
                         model_type = gr.Radio(
-                            choices=[("Original", "Original"), ("Original with Endframe", "Original with Endframe"), ("F1", "F1"), ("Video", "Video"), ("Video with Endframe", "Video with Endframe"), ("Video F1", "Video F1")],
+                            choices=[("Original", "Original"), ("Original with Endframe", "Original with Endframe"), ("F1", "F1"), ("Video", "Video"), ("Video with Endframe", "Video with Endframe"), ("Video F1", "Video F1"), ("Sequence", "Sequence")],
                             value="Original",
                             label="Generation Type",
                             elem_classes="poly-modes"
@@ -352,7 +369,50 @@ def create_interface(
                                 )
                                 num_cleaned_frames = gr.Slider(label="Number of Context Frames (Adherence to Video)", minimum=2, maximum=10, value=5, step=1, interactive=True, info="Expensive. Retain more video details. Reduce if memory issues or motion too restricted (jumpcut, ignoring prompt, still).")
 
-                            
+                            # Sequence: a timeline of keyframes, each followed by the segment that leads to the next one.
+                            with gr.Group(visible=False) as sequence_input_group:
+                                sequence_upload = gr.File(
+                                    label="Keyframe Images (upload 2 or more at once, in file name order; replace any one below)",
+                                    file_count="multiple",
+                                    file_types=["image"],
+                                    type="filepath",
+                                    height=120
+                                )
+                                sequence_count = gr.Slider(
+                                    label="Number of Keyframes", minimum=2, maximum=MAX_SEQUENCE_IMAGES, value=2, step=1,
+                                    info="Each pair of neighbouring keyframes gets a generated segment, and the segments are joined into one video."
+                                )
+                                sequence_rows, sequence_images, sequence_segment_columns, sequence_prompts, sequence_seconds = [], [], [], [], []
+                                for i in range(MAX_SEQUENCE_IMAGES):
+                                    with gr.Row(visible=i < 2) as sequence_row:
+                                        sequence_images.append(gr.Image(
+                                            sources=['upload', 'clipboard'],
+                                            type="numpy",
+                                            label=f"Keyframe {i + 1}",
+                                            image_mode="RGB",
+                                            height=180,
+                                            show_download_button=False,
+                                            scale=1
+                                        ))
+                                        if i < MAX_SEQUENCE_IMAGES - 1:
+                                            with gr.Column(scale=2, visible=i < 1) as sequence_segment_column:
+                                                sequence_prompts.append(gr.Textbox(
+                                                    label=f"Segment {i + 1}: Keyframe {i + 1} → {i + 2}",
+                                                    placeholder="What happens in between. Leave empty to use the Prompt below.",
+                                                    lines=3
+                                                ))
+                                                sequence_seconds.append(gr.Slider(
+                                                    label="Segment Length (Seconds)", minimum=1, maximum=30, value=3, step=0.1
+                                                ))
+                                            sequence_segment_columns.append(sequence_segment_column)
+                                    sequence_rows.append(sequence_row)
+                                sequence_chain = gr.Checkbox(
+                                    label="Seamless transitions",
+                                    value=True,
+                                    info="Start each segment from the frame the previous one actually ended on, so the joins have no jump. Unchecked, every segment starts exactly on its keyframe."
+                                )
+
+
                             # End Frame Image Input
                             # Initial visibility is False, controlled by update_input_visibility
                             with gr.Column(scale=1, visible=False) as end_frame_group_original:
@@ -394,7 +454,7 @@ def create_interface(
                                     minimum=0, maximum=10, value=4, step=1,
                                     label="Number of sections to blend between prompts"
                                 )
-                            with gr.Accordion("Batch Input", open=False):
+                            with gr.Accordion("Batch Input", open=False) as batch_accordion:
                                 batch_input_images = gr.File(
                                     label="Batch Images (Upload one or more)",
                                     file_count="multiple",
@@ -1123,7 +1183,8 @@ def create_interface(
             return job_id, result, preview, top_preview, desc, html, queue_status_data, queue_stats_text
 
         # Connect the main process function (wrapper for adding to queue)
-        def process_with_queue_update(model_type_arg, *args):
+        def process_with_queue_update(model_type_arg, *args, sequence=None):
+            # sequence: for a Sequence job, the keyword-only sequence_* arguments of process_fn (see collect_sequence)
             # Call update_stats to get both queue_status_data and queue_stats_text
             queue_status_data, queue_stats_text = update_stats() # MODIFIED
 
@@ -1178,6 +1239,9 @@ def create_interface(
             if model_type_arg == "Original with Endframe" or model_type_arg == "F1 with Endframe" or model_type_arg == "Video with Endframe":
                 actual_end_frame_image_for_backend = end_frame_image_original_arg
                 actual_end_frame_strength_for_backend = end_frame_strength_original_arg
+            elif model_type_arg == "Sequence":
+                # Every keyframe after the first is the end frame of a segment
+                actual_end_frame_strength_for_backend = end_frame_strength_original_arg
 
             # Get the input video path for Video model
             input_image_path = None
@@ -1199,7 +1263,8 @@ def create_interface(
                                 combine_with_source_arg,
                                 num_cleaned_frames_arg,
                                 lora_names_states_arg,
-                                *lora_slider_values_tuple
+                                *lora_slider_values_tuple,
+                                **(sequence or {})
                                )
             # If randomize_seed is checked, generate a new random seed for the next job
             new_seed_value = None
@@ -1337,15 +1402,36 @@ def create_interface(
         ips.extend([lora_sliders[lora] for lora in lora_names])
 
 
+        # The Sequence inputs, after generation_count in the start button's inputs.
+        sequence_ips = [sequence_count, sequence_chain] + sequence_images + sequence_prompts + sequence_seconds
+
+        def collect_sequence(seq_args):
+            """The sequence_* arguments for process_fn from the sequence_ips values, or an error message."""
+            count, chain = int(seq_args[0]), seq_args[1]
+            images = seq_args[2:2 + MAX_SEQUENCE_IMAGES][:count]
+            prompts = seq_args[2 + MAX_SEQUENCE_IMAGES:2 + 2 * MAX_SEQUENCE_IMAGES - 1][:count - 1]
+            seconds = seq_args[2 + 2 * MAX_SEQUENCE_IMAGES - 1:][:count - 1]
+            missing = [str(i + 1) for i, image in enumerate(images) if image is None]
+            if missing:
+                return None, f"Add an image for keyframe {', '.join(missing)} (or lower the Number of Keyframes)."
+            return {"sequence_images": list(images), "sequence_prompts": list(prompts),
+                    "sequence_seconds": list(seconds), "chain_segments": chain}, None
+
         # --- Connect Buttons ---
         def handle_start_button(selected_model, *args):
-            *job_args, count = args
+            job_args, count, seq_args = list(args[:len(ips)]), args[len(ips)], args[len(ips) + 1:]
+            sequence = None
+            if selected_model == "Sequence":
+                sequence, problem = collect_sequence(seq_args)
+                if problem:
+                    gr.Warning(problem)
+                    qs_data, qs_text = update_stats()
+                    return [gr.update()] * 5 + [gr.update(value="🚀 Add to Queue", interactive=True), gr.update(), qs_data, qs_text, gr.update(), gr.update()]
             count = clamp_generation_count(count)
-            job_args = list(job_args)
             # Queue `count` jobs; the seed is at index 6 of the ips list and randomize_seed at 7.
             result = None
             for i in range(count):
-                result = process_with_queue_update(selected_model, *job_args)
+                result = process_with_queue_update(selected_model, *job_args, sequence=sequence)
                 if i < count - 1:
                     # process_with_queue_update returns the next random seed (or a no-op update) at index 9.
                     next_seed = result[9] if job_args[7] and isinstance(result[9], int) else job_args[6] + 1
@@ -1440,7 +1526,7 @@ def create_interface(
         ).then(
             # Then process the job
             fn=handle_start_button,
-            inputs=[model_type] + ips + [generation_count],
+            inputs=[model_type] + ips + [generation_count] + sequence_ips,
             outputs=[result_video, current_job_id, preview_image, progress_desc, progress_bar, start_button, end_button, queue_status, queue_stats_display, seed, video_input_required_message] # Added video_input_required_message
         ).then( # Ensure validation is re-checked after job processing completes
             fn=update_start_button_state,
@@ -1534,15 +1620,21 @@ def create_interface(
         def on_model_type_change(selected_model):
             is_xy_plot = selected_model == "XY Plot"
             is_ui_video_model_flag = is_video_model(selected_model)
+            is_sequence = selected_model == "Sequence"
             shows_end_frame = selected_model in ["Original with Endframe", "Video with Endframe"]
 
             return (
                 gr.update(visible=not is_xy_plot),  # standard_generation_group
                 gr.update(visible=is_xy_plot),      # xy_group
-                gr.update(visible=not is_xy_plot and not is_ui_video_model_flag),  # image_input_group
+                gr.update(visible=not is_xy_plot and not is_ui_video_model_flag and not is_sequence),  # image_input_group
                 gr.update(visible=not is_xy_plot and is_ui_video_model_flag),      # video_input_group
+                gr.update(visible=not is_xy_plot and is_sequence),      # sequence_input_group
                 gr.update(visible=not is_xy_plot and shows_end_frame),     # end_frame_group_original
-                gr.update(visible=not is_xy_plot and shows_end_frame),      # end_frame_slider_group
+                gr.update(visible=not is_xy_plot and (shows_end_frame or is_sequence)),      # end_frame_slider_group
+                # Each keyframe after the first is a segment's end frame
+                gr.update(label="Keyframe Influence" if is_sequence else "End Frame Influence"),  # end_frame_strength_original
+                gr.update(visible=not is_sequence),  # total_second_length (a sequence has a length per segment)
+                gr.update(visible=not is_sequence),  # batch_accordion
                 gr.update(visible=not is_xy_plot),   # start_button
                 gr.update(visible=is_xy_plot)       # xy_plot_process_btn
             )
@@ -1556,8 +1648,12 @@ def create_interface(
                 xy_group,
                 image_input_group,
                 video_input_group,
+                sequence_input_group,
                 end_frame_group_original,
                 end_frame_slider_group,
+                end_frame_strength_original,
+                total_second_length,
+                batch_accordion,
                 start_button,
                 xy_plot_process_btn # This is the button returned from the dictionary
             ]
@@ -1565,6 +1661,48 @@ def create_interface(
             fn=update_start_button_state,
             inputs=[model_type, input_video],
             outputs=[start_button, video_input_required_message]
+        )
+
+        # --- Sequence keyframes ---
+        def update_sequence_slots(count):
+            """Show `count` keyframe slots, and a segment beside every one but the last."""
+            count = int(count)
+            return ([gr.update(visible=i < count) for i in range(MAX_SEQUENCE_IMAGES)]
+                    + [gr.update(visible=i < count - 1) for i in range(MAX_SEQUENCE_IMAGES - 1)])
+
+        def load_sequence_upload(files):
+            """Fill the keyframe slots from the uploaded images, in file name order."""
+            if not files:
+                return [gr.update()] * (1 + MAX_SEQUENCE_IMAGES)
+            files = sorted(files, key=natural_key)
+            if len(files) > MAX_SEQUENCE_IMAGES:
+                gr.Warning(f"A sequence takes at most {MAX_SEQUENCE_IMAGES} keyframes; using the first {MAX_SEQUENCE_IMAGES}.")
+            images = []
+            for path in files[:MAX_SEQUENCE_IMAGES]:
+                try:
+                    images.append(load_image(path))
+                except Exception as e:
+                    gr.Warning(f"Skipped {os.path.basename(path)}: {e}")
+            if not images:
+                return [gr.update()] * (1 + MAX_SEQUENCE_IMAGES)
+            return ([gr.update(value=max(2, len(images)))]
+                    + [gr.update(value=images[i] if i < len(images) else None) for i in range(MAX_SEQUENCE_IMAGES)])
+
+        sequence_slot_outputs = sequence_rows + sequence_segment_columns
+        sequence_upload.upload(
+            fn=load_sequence_upload,
+            inputs=[sequence_upload],
+            outputs=[sequence_count] + sequence_images
+        ).then(
+            fn=update_sequence_slots,
+            inputs=[sequence_count],
+            outputs=sequence_slot_outputs
+        )
+        sequence_count.change(
+            fn=update_sequence_slots,
+            inputs=[sequence_count],
+            outputs=sequence_slot_outputs,
+            show_progress="hidden"
         )
         
         # Connect input_video change to the validation function
@@ -1871,6 +2009,81 @@ def create_interface(
             inputs=[preset_dropdown, model_type],
             outputs=[preset_dropdown, save_preset_button, confirm_delete_row]
         )
+
+        # --- Workspace tabs ---
+        # Every tab shares the one set of controls below: switching saves their values into the tab
+        # being left and loads the other tab's. (Jobs all go through the same queue, and the result
+        # and progress panel on the right follows the running job whichever tab is open.)
+        workspace_json = [model_type, generation_count, *ui_components.values(), sequence_count, sequence_chain,
+                          *sequence_prompts, *sequence_seconds]
+        workspace_media = [input_image, input_video, end_frame_image_original, *sequence_images]
+        workspace_controls = workspace_json + workspace_media
+        workspace_defaults = [c.value for c in workspace_json]
+        workspace_ready = gr.State(False)  # the browser's tabs are restored; until then don't overwrite them
+        n_json = len(workspace_json)
+
+        def workspace_loads(tab):
+            """Control updates (workspace_controls) that show a tab's settings."""
+            values = tab["v"] if tab["v"] is not None else workspace_defaults
+            media = tab["m"] if tab["m"] is not None else [None] * len(workspace_media)
+            values = [[x for x in v if x in lora_names] if c is lora_selector and isinstance(v, list) else v
+                      for c, v in zip(workspace_json, values)]
+            return values + list(media)
+
+        def show_workspace(state):
+            """(state, name box) for the active tab, plus the tab bar."""
+            return state, gr.update(choices=workspaces.choices(state), value=state["active"]), workspaces.active_tab(state)["name"]
+
+        def switch_workspace(new_id, state, *live):
+            state = workspaces.switch(workspaces.save_active(state, live[:n_json], live[n_json:]), new_id)
+            return [state, workspaces.active_tab(state)["name"]] + workspace_loads(workspaces.active_tab(state))
+
+        def new_workspace(state, *live):
+            added = workspaces.add_tab(workspaces.save_active(state, live[:n_json], live[n_json:]))
+            if added is None:
+                gr.Warning(f"At most {workspaces.MAX_WORKSPACES} workspaces.")
+                return [gr.skip()] * (3 + len(workspace_controls))
+            return [*show_workspace(added), *workspace_loads(workspaces.active_tab(added))]
+
+        def close_workspace(state, *live):
+            closed = workspaces.close_tab(state, state["active"])
+            return [*show_workspace(closed), *workspace_loads(workspaces.active_tab(closed))]
+
+        def rename_workspace(state, name):
+            renamed = workspaces.rename_tab(state, state["active"], name)
+            return show_workspace(renamed)
+
+        def persist_workspaces(ready, state, *live):
+            return workspaces.to_browser(state, live[:n_json]) if ready else gr.skip()
+
+        def restore_workspaces(data):
+            state = workspaces.from_browser(data, n_json)
+            if state is None:
+                return [gr.skip(), gr.skip(), gr.skip(), True] + [gr.skip()] * len(workspace_controls)
+            values = workspace_loads(workspaces.active_tab(state))
+            return [state, gr.update(choices=workspaces.choices(state), value=state["active"]),
+                    workspaces.active_tab(state)["name"], True] + values[:n_json] + [gr.skip()] * len(workspace_media)
+
+        persist_args = dict(fn=persist_workspaces, inputs=[workspace_ready, workspace_state, *workspace_json],
+                            outputs=[workspace_browser_state], show_progress="hidden")
+        tab_outputs = [workspace_state, workspace_selector, workspace_name] + workspace_controls
+        workspace_selector.input(
+            fn=switch_workspace, inputs=[workspace_selector, workspace_state, *workspace_controls],
+            outputs=[workspace_state, workspace_name] + workspace_controls, show_progress="hidden"
+        ).then(**persist_args)
+        workspace_new_btn.click(
+            fn=new_workspace, inputs=[workspace_state, *workspace_controls], outputs=tab_outputs, show_progress="hidden"
+        ).then(**persist_args)
+        workspace_close_btn.click(
+            fn=close_workspace, inputs=[workspace_state, *workspace_controls], outputs=tab_outputs, show_progress="hidden"
+        ).then(**persist_args)
+        for trigger in (workspace_name.submit, workspace_name.blur):
+            trigger(
+                fn=rename_workspace, inputs=[workspace_state, workspace_name],
+                outputs=[workspace_state, workspace_selector, workspace_name], show_progress="hidden"
+            ).then(**persist_args)
+        # Keep the browser's copy current as settings change (media isn't kept, only settings)
+        gr.on(triggers=[c.change for c in workspace_json], trigger_mode="always_last", queue=False, **persist_args)
 
         # --- Definition of apply_startup_settings (AFTER ui_components and apply_preset are defined) ---
         # This function needs access to `settings`, `model_type` (Generate tab Radio),
@@ -2252,8 +2465,13 @@ def create_interface(
             fn=create_latents_layout_update,
             inputs=None,
             outputs=[top_preview_row, preview_image]
+        ).then(
+            # Last, so the tabs the browser kept win over the startup model and preset
+            fn=restore_workspaces,
+            inputs=[workspace_browser_state],
+            outputs=[workspace_state, workspace_selector, workspace_name, workspace_ready] + workspace_controls
         )
-        
+
         # --- Prompt Enhancer Connection ---
         def handle_enhance_prompt(current_prompt_text):
             """Calls the LLM enhancer and returns the updated text."""

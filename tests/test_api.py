@@ -345,6 +345,30 @@ def test_generate_from_the_last_frame_of_a_job(env):
     assert env.client.post("/api/generate", data={"prompt": "x", "image_from_job": "nope"}).status_code == 404
 
 
+def test_sequence(env):
+    c = env.client
+    images = [("images", (f"{i}.png", png(color=(i * 60, 0, 0)), "image/png")) for i in range(3)]
+    body = c.post("/api/sequence", data={"prompts": json.dumps(["walks in", ""]), "prompt": "keeps walking",
+                                         "segment_seconds": "[2, 3.5]", "chain": "false", "end_frame_strength": 0.7,
+                                         "seed": 5, "wait": "true"}, files=images).json()
+    assert body["status"] == "done" and body["kind"] == "sequence" and body["model_type"] == "Sequence"
+    kw = env.submitted[-1]
+    assert len(kw["sequence_images"]) == 3 and kw["sequence_images"][2][0, 0, 0] == 120
+    assert kw["input_image"] is kw["sequence_images"][0] and kw["end_frame_strength"] == 0.7
+    assert kw["sequence_prompts"] == ["walks in", ""] and kw["prompt_text"] == "keeps walking"
+    assert kw["sequence_seconds"] == [2.0, 3.5] and kw["chain_segments"] is False and kw["seed"] == 5
+
+    # Without 'prompt', every segment needs its own.
+    c.post("/api/sequence", data={"prompts": '["a", "b"]', "wait": "true"}, files=images)
+    assert env.submitted[-1]["sequence_seconds"] is None and env.submitted[-1]["chain_segments"] is True
+    bad = [({"prompts": '["a", ""]'}, images), ({"prompt": "x", "prompts": '["a"]'}, images),
+           ({"prompt": "x", "segment_seconds": "[2, 500]"}, images), ({"prompt": "x", "segment_seconds": "3"}, images),
+           ({"prompt": "x"}, images[:1]), ({"prompt": "x"}, images * 4)]
+    for data, files in bad:
+        assert c.post("/api/sequence", data=data, files=files).status_code == 400, data
+    assert c.get("/api/options").json()["sequence"] == {"min_images": 2, "max_images": 10}
+
+
 def test_generate_count_queues_several_jobs(env):
     c = env.client
     r = c.post("/api/generate", data={"prompt": "a fox", "seed": 10, "count": 3, "wait": "true"})

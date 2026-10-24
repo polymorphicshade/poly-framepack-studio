@@ -21,6 +21,7 @@ from modules.pipelines.video_tools import combine_videos_sequentially_from_tenso
 from modules import DUMMY_LORA_NAME # Import the constant
 from modules.llm_captioner import unload_captioning_model
 from modules.llm_enhancer import unload_enhancing_model
+from modules.sequence import run_sequence
 from . import create_pipeline
 
 import __main__ as studio_module # Get a reference to the __main__ module object
@@ -92,11 +93,24 @@ def worker(
     input_video=None,     # Add input_video parameter with default value of None
     combine_with_source=None,  # Add combine_with_source parameter
     num_cleaned_frames=5,  # Add num_cleaned_frames parameter with default value
-    save_metadata_checked=True  # Add save_metadata_checked parameter
+    save_metadata_checked=True,  # Add save_metadata_checked parameter
+    sequence_image_paths=None,  # Sequence: the keyframe images, in order
+    sequence_prompts=None,  # Sequence: one prompt per segment (blank: prompt_text)
+    sequence_seconds=None,  # Sequence: one length per segment
+    chain_segments=True,  # Sequence: start each segment from the last frame of the one before
+    reuse_loaded_model=False  # Keep the loaded transformer if it is already this model type (sequence segments)
 ):
     """
     Worker function for video generation.
     """
+
+    if model_type == "Sequence":
+        # A sequence runs this function once per segment, as an "Original with Endframe" job.
+        params = dict(locals())
+        from __main__ import settings, stream
+        from modules.pipelines.metadata_utils import save_job_start_image
+        return run_sequence(params, worker, generate_timestamp(), settings, job_stream if job_stream is not None else stream,
+                            save_start_image=save_job_start_image, resize=resize_and_center_crop)
 
     random_generator = torch.Generator("cpu").manual_seed(seed)
 
@@ -252,31 +266,35 @@ def worker(
         print(f"Worker starting for model type: {model_type}")
         print(f"Worker: Before model assignment, studio_module.current_generator is {type(studio_module.current_generator)}, id: {id(studio_module.current_generator)}")
         
-        # Create the appropriate model generator
-        new_generator = create_model_generator(
-            model_type,
-            text_encoder=text_encoder,
-            text_encoder_2=text_encoder_2,
-            tokenizer=tokenizer,
-            tokenizer_2=tokenizer_2,
-            vae=vae,
-            image_encoder=image_encoder,
-            feature_extractor=feature_extractor,
-            high_vram=high_vram,
-            prompt_embedding_cache=prompt_embedding_cache,
-            offline=args.offline,
-            settings=settings
-        )
-        
-        # Update the global generator
-        # This modifies the 'current_generator' attribute OF THE '__main__' MODULE OBJECT
-        studio_module.current_generator = new_generator
-        print(f"Worker: AFTER model assignment, studio_module.current_generator is {type(studio_module.current_generator)}, id: {id(studio_module.current_generator)}")
-        if studio_module.current_generator:
-             print(f"Worker: studio_module.current_generator.transformer is {type(studio_module.current_generator.transformer)}")        
-             
-        # Load the transformer model
-        studio_module.current_generator.load_model()
+        loaded = studio_module.current_generator
+        if reuse_loaded_model and loaded is not None and loaded.transformer is not None and loaded.get_model_name() == model_type:
+            print(f"Worker: reusing the loaded {model_type} transformer")
+        else:
+            # Create the appropriate model generator
+            new_generator = create_model_generator(
+                model_type,
+                text_encoder=text_encoder,
+                text_encoder_2=text_encoder_2,
+                tokenizer=tokenizer,
+                tokenizer_2=tokenizer_2,
+                vae=vae,
+                image_encoder=image_encoder,
+                feature_extractor=feature_extractor,
+                high_vram=high_vram,
+                prompt_embedding_cache=prompt_embedding_cache,
+                offline=args.offline,
+                settings=settings
+            )
+
+            # Update the global generator
+            # This modifies the 'current_generator' attribute OF THE '__main__' MODULE OBJECT
+            studio_module.current_generator = new_generator
+            print(f"Worker: AFTER model assignment, studio_module.current_generator is {type(studio_module.current_generator)}, id: {id(studio_module.current_generator)}")
+            if studio_module.current_generator:
+                 print(f"Worker: studio_module.current_generator.transformer is {type(studio_module.current_generator.transformer)}")
+
+            # Load the transformer model
+            studio_module.current_generator.load_model()
         
         # Ensure the model has no LoRAs loaded
         print(f"Ensuring {model_type} model has no LoRAs loaded")

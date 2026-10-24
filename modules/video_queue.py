@@ -1060,6 +1060,15 @@ class VideoJobQueue:
                         'has_input_image': job_data.get('has_input_image', True),
                         'combine_with_source': job_data.get('combine_with_source', False),
                     }
+
+                    # Sequence jobs keep their keyframes as files (in input_files_dir)
+                    if params['model_type'] == "Sequence":
+                        params.update({
+                            'sequence_image_paths': job_data.get('sequence_image_paths'),
+                            'sequence_prompts': job_data.get('sequence_prompts'),
+                            'sequence_seconds': job_data.get('sequence_seconds'),
+                            'chain_segments': job_data.get('chain_segments', True),
+                        })
                     
                     # Load input image from disk if saved path exists
                     if "saved_input_image_path" in job_data and os.path.exists(job_data["saved_input_image_path"]):
