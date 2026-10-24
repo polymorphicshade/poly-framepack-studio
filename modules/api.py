@@ -382,6 +382,7 @@ def create_api(
     async def generate(
         model: str = Form("original", description="original or f1"),
         image: UploadFile | None = File(None, description="Start frame; without one the video starts from latent_type"),
+        image_from_job: str | None = Form(None, description="Or: start from the last frame of a finished job's video"),
         end_frame: UploadFile | None = File(None, description="Optional end frame (original only: 'Original with Endframe')"),
         end_frame_strength: float | None = Form(None, description=OPTIONS["end_frame_strength"][3]),
         latent_type: str | None = Form(None, description="Start without an image from: noise, white, black or green"),
@@ -391,6 +392,11 @@ def create_api(
         if model not in GENERATE_MODELS:
             _bad(f"model must be one of {', '.join(GENERATE_MODELS)}")
         img, end = _image(image, "image"), _image(end_frame, "end_frame")
+        if img is None and image_from_job:
+            try:
+                img = await asyncio.to_thread(extract_last_frame, source_video(image_from_job))
+            except ValueError as e:
+                _bad(f"Could not take the last frame of job {image_from_job}: {e}")
         if end is not None and model != "original":
             _bad("end_frame needs model=original")
         model_type = "Original with Endframe" if end is not None else GENERATE_MODELS[model]

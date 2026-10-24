@@ -329,3 +329,17 @@ def test_last_frame_of_a_result_video(env):
     frame = np.array(Image.open(io.BytesIO(r.content)))
     assert frame.shape == (48, 64, 3) and abs(int(frame.mean()) - 200) < 12
     assert env.client.get(f"/api/jobs/{body['id']}/videos/5/last-frame").status_code == 404
+
+
+def test_generate_from_the_last_frame_of_a_job(env):
+    cv2 = pytest.importorskip("cv2")
+    first = env.client.post("/api/generate", data={"prompt": "a fox", "wait": "true"}).json()
+    video = env.queue.get_job(first["id"]).result
+    writer = cv2.VideoWriter(video, cv2.VideoWriter_fourcc(*"mp4v"), 8, (64, 48))
+    for _ in range(3):
+        writer.write(np.full((48, 64, 3), 200, dtype=np.uint8))
+    writer.release()
+    r = env.client.post("/api/generate", data={"prompt": "a fox", "image_from_job": first["id"], "wait": "true"})
+    assert r.status_code == 200 and r.json()["status"] == "done"
+    assert env.submitted[-1]["input_image"].shape == (48, 64, 3)
+    assert env.client.post("/api/generate", data={"prompt": "x", "image_from_job": "nope"}).status_code == 404
