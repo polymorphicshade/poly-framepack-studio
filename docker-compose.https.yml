@@ -1,0 +1,81 @@
+# Same stack as docker-compose.yml, with an nginx sidecar terminating HTTPS.
+#
+#   cp .env.https.example .env      # put the host's LAN address in the certificate
+#   mkdir -p loras                  # so the LoRA folder is owned by you, not root
+#   docker compose -f docker-compose.https.yml up -d --build
+#   https://<host>:8443
+#
+# HTTPS is port 8443, not 7860. 7860 is the app's own plain HTTP listener and is
+# published on 127.0.0.1 only; pointing a browser at https://<host>:7860 gets
+# you "SSL_ERROR_RX_RECORD_TOO_LONG", because nothing there speaks TLS.
+#
+# The certificate is self-signed and generated into ./certs on first boot, so
+# the browser will warn once until you accept it (or drop a real
+# fullchain.pem / privkey.pem into ./certs).
+
+services:
+  app:
+    build: .
+    image: poly-framepack-studio:latest
+    restart: unless-stopped
+    # Bound to loopback only - nginx is the way in from anywhere else. Drop the
+    # 127.0.0.1 prefix if you want plain HTTP on the LAN as well.
+    ports:
+      - "127.0.0.1:${PORT:-7860}:7860"
+    environment:
+      FRAMEPACK_SERVE_ARGS: ${FRAMEPACK_SERVE_ARGS:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - state:/data
+      - models:/data/cache
+      - outputs:/data/outputs
+      - ${LORAS_DIR:-./loras}:/data/loras
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # TLS front end. Terminates HTTPS and proxies to the app over the internal
+  # compose network, so the app itself never speaks TLS.
+  nginx:
+    build:
+      context: ./docker/nginx
+    image: poly-framepack-studio-nginx:local
+    restart: unless-stopped
+
+    # Start order only, not readiness: nginx returning 502 while the models load
+    # is better than nginx refusing to start.
+    depends_on:
+      - app
+
+    ports:
+      - "${HTTPS_PORT:-8443}:443"
+
+    volumes:
+      - ${NGINX_CONF:-./docker/nginx/nginx.conf}:/etc/nginx/conf.d/default.conf:ro
+      # Self-signed cert is generated here on first boot. Drop real fullchain.pem
+      # / privkey.pem in to use a CA-issued one instead.
+      - ./certs:/etc/nginx/certs
+
+    environment:
+      TLS_COMMON_NAME: "${TLS_COMMON_NAME:-localhost}"
+      TLS_SAN: "${TLS_SAN:-DNS:localhost,IP:127.0.0.1}"
+
+    # Goes through nginx to the app, so it passes once both are up (the app's
+    # first boot downloads weights for a while). -k: the cert is self-signed.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsSk https://127.0.0.1/gradio_api/queue/status >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30m
+
+# Same volumes as docker-compose.yml: both stacks use the same project name, so
+# switching between them keeps the downloaded weights, settings and generated videos.
+volumes:
+  state:       # settings, presets, the queue, uploaded inputs and temp files
+  models:      # model weights (~25 GB per model family, plus the shared text encoders)
+  outputs:     # generated videos and metadata

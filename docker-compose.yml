@@ -1,0 +1,36 @@
+# poly-framepack-studio on an NVIDIA GPU, over plain HTTP.
+#
+#   cp .env.example .env      # optional: port, LoRA folder, serve flags, ...
+#   mkdir -p loras            # so the LoRA folder is owned by you, not root
+#   docker compose up -d --build
+#   http://<host>:7860
+#
+# For HTTPS, use docker-compose.https.yml instead.
+
+services:
+  app:
+    build: .
+    image: poly-framepack-studio:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-7860}:7860"
+    environment:
+      FRAMEPACK_SERVE_ARGS: ${FRAMEPACK_SERVE_ARGS:-}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - state:/data
+      - models:/data/cache
+      - outputs:/data/outputs
+      - ${LORAS_DIR:-./loras}:/data/loras
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  state:       # settings, presets, the queue, uploaded inputs and temp files
+  models:      # model weights (~25 GB per model family, plus the shared text encoders)
+  outputs:     # generated videos and metadata
