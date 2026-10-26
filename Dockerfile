@@ -13,12 +13,22 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
 # The newest torch the pinned diffusers/transformers versions in requirements.txt are known to work with.
 ARG TORCH_VERSION=2.7.1
 ARG TORCHVISION_VERSION=0.22.1
+# SageAttention 2 is compiled from source (there are no Linux wheels) for these GPU architectures:
+# Ampere (8.0, 8.6), Ada (8.9), Hopper (9.0) and Blackwell (12.0). Older GPUs are not supported by
+# it and fall back to PyTorch's attention. Listing only your own GPU (e.g. "8.9") builds faster.
+ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
+ARG SAGEATTENTION_REF=v2.2.0
+# Parallel nvcc jobs for the SageAttention build; each can take several GB of RAM.
+ARG MAX_JOBS=4
 
 # ---------------------------------------------------------------------------- build
 FROM python:${PYTHON_VERSION}-slim-bookworm AS build
 ARG TORCH_INDEX
 ARG TORCH_VERSION
 ARG TORCHVISION_VERSION
+ARG TORCH_CUDA_ARCH_LIST
+ARG SAGEATTENTION_REF
+ARG MAX_JOBS
 
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m venv /opt/venv
@@ -33,6 +43,25 @@ RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} --in
 RUN pip install "setuptools<81" wheel cython numpy==1.26.2 \
     && pip install --no-build-isolation basicsr
 
+# SageAttention, the fastest attention backend hunyuan_video_packed.py supports. It builds against
+# the torch above, so it needs nvcc and the CUDA headers matching the cu128 wheels. The toolkit stays
+# in this stage; only the compiled package in /opt/venv reaches the runtime image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential git wget ca-certificates \
+    && wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cuda-nvcc-12-8 cuda-cudart-dev-12-8 cuda-nvrtc-dev-12-8 cuda-nvtx-12-8 cuda-profiler-api-12-8 \
+        libcublas-dev-12-8 libcusparse-dev-12-8 libcusolver-dev-12-8 libcurand-dev-12-8 \
+    && rm -rf /var/lib/apt/lists/*
+ENV CUDA_HOME=/usr/local/cuda-12.8
+RUN git clone --depth 1 --branch ${SAGEATTENTION_REF} https://github.com/thu-ml/SageAttention.git /tmp/sageattention \
+    && pip install packaging ninja \
+    && TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" MAX_JOBS=${MAX_JOBS} \
+        pip install --no-build-isolation /tmp/sageattention \
+    && rm -rf /tmp/sageattention
+
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt \
     && find /opt/venv -name "__pycache__" -type d -prune -exec rm -rf {} +
@@ -41,9 +70,10 @@ RUN pip install -r /tmp/requirements.txt \
 FROM python:${PYTHON_VERSION}-slim-bookworm
 
 # ffmpeg: video encoding and the post-processing toolbox (so it is never downloaded at runtime);
-# libgl1 and libglib2.0-0: OpenCV.
+# libgl1 and libglib2.0-0: OpenCV; gcc and libc6-dev: Triton (used by SageAttention) compiles a
+# small launcher with the system C compiler the first time it runs.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 1000 app \
@@ -61,6 +91,7 @@ ENV PATH=/opt/venv/bin:$PATH \
     FRAMEPACK_CACHE_DIR=/data/cache \
     TORCH_HOME=/data/cache/torch \
     XDG_CACHE_HOME=/data/cache \
+    TRITON_CACHE_DIR=/data/cache/triton \
     HF_HUB_DISABLE_TELEMETRY=1 \
     GRADIO_ANALYTICS_ENABLED=False \
     FRAMEPACK_SERVE_ARGS=""
