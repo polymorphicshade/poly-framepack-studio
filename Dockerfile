@@ -13,22 +13,32 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
 # The newest torch the pinned diffusers/transformers versions in requirements.txt are known to work with.
 ARG TORCH_VERSION=2.7.1
 ARG TORCHVISION_VERSION=0.22.1
-# SageAttention 2 is compiled from source (there are no Linux wheels) for these GPU architectures:
-# Ampere (8.0, 8.6), Ada (8.9), Hopper (9.0) and Blackwell (12.0). Older GPUs are not supported by
-# it and fall back to PyTorch's attention. Listing only your own GPU (e.g. "8.9") builds faster.
+# Attention backend: "sage" (fastest; compiled from source, as there are no Linux wheels), "flash"
+# (a prebuilt flash-attn wheel, no compiling) or "none" (PyTorch's own attention). Both need an
+# Ampere (RTX 30-series) or newer GPU; older GPUs fall back to PyTorch's attention.
+ARG ATTENTION=sage
+# GPU architectures SageAttention is compiled for: Ampere (8.0, 8.6), Ada (8.9), Hopper (9.0) and
+# Blackwell (12.0). Listing only your own GPUs (e.g. "8.6;8.9") builds faster.
 ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
 ARG SAGEATTENTION_REF=v2.2.0
-# Parallel nvcc jobs for the SageAttention build; each can take several GB of RAM.
-ARG MAX_JOBS=4
+# The SageAttention build runs MAX_JOBS compiler jobs with NVCC_THREADS threads each, and a single
+# thread can take several GB of RAM. Upstream's defaults (4 x 8) can exhaust the memory of a desktop
+# or a Docker Desktop VM and hang the machine; raise these only with plenty of RAM to spare.
+ARG MAX_JOBS=1
+ARG NVCC_THREADS=2
+ARG FLASH_ATTN_WHEEL=https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 
 # ---------------------------------------------------------------------------- build
 FROM python:${PYTHON_VERSION}-slim-bookworm AS build
 ARG TORCH_INDEX
 ARG TORCH_VERSION
 ARG TORCHVISION_VERSION
+ARG ATTENTION
 ARG TORCH_CUDA_ARCH_LIST
 ARG SAGEATTENTION_REF
 ARG MAX_JOBS
+ARG NVCC_THREADS
+ARG FLASH_ATTN_WHEEL
 
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN python -m venv /opt/venv
@@ -43,24 +53,31 @@ RUN pip install torch==${TORCH_VERSION} torchvision==${TORCHVISION_VERSION} --in
 RUN pip install "setuptools<81" wheel cython numpy==1.26.2 \
     && pip install --no-build-isolation basicsr
 
-# SageAttention, the fastest attention backend hunyuan_video_packed.py supports. It builds against
-# the torch above, so it needs nvcc and the CUDA headers matching the cu128 wheels. The toolkit stays
-# in this stage; only the compiled package in /opt/venv reaches the runtime image.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential git wget ca-certificates \
-    && wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        cuda-nvcc-12-8 cuda-cudart-dev-12-8 cuda-nvrtc-dev-12-8 cuda-nvtx-12-8 cuda-profiler-api-12-8 \
-        libcublas-dev-12-8 libcusparse-dev-12-8 libcusolver-dev-12-8 libcurand-dev-12-8 \
-    && rm -rf /var/lib/apt/lists/*
-ENV CUDA_HOME=/usr/local/cuda-12.8
-RUN git clone --depth 1 --branch ${SAGEATTENTION_REF} https://github.com/thu-ml/SageAttention.git /tmp/sageattention \
-    && pip install packaging ninja \
-    && TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" MAX_JOBS=${MAX_JOBS} \
-        pip install --no-build-isolation /tmp/sageattention \
-    && rm -rf /tmp/sageattention
+# The attention backend (see ATTENTION above). SageAttention builds against the torch above, so it
+# needs nvcc and the CUDA headers matching the cu128 wheels. The toolkit stays in this stage; only
+# the compiled package in /opt/venv reaches the runtime image.
+RUN set -e; \
+    if [ "$ATTENTION" = "sage" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends build-essential git wget ca-certificates; \
+        wget -q https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb; \
+        dpkg -i cuda-keyring_1.1-1_all.deb; rm cuda-keyring_1.1-1_all.deb; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends \
+            cuda-nvcc-12-8 cuda-cudart-dev-12-8 cuda-nvrtc-dev-12-8 cuda-nvtx-12-8 cuda-profiler-api-12-8 \
+            libcublas-dev-12-8 libcusparse-dev-12-8 libcusolver-dev-12-8 libcurand-dev-12-8; \
+        rm -rf /var/lib/apt/lists/*; \
+        git clone --depth 1 --branch "$SAGEATTENTION_REF" https://github.com/thu-ml/SageAttention.git /tmp/sageattention; \
+        sed -i "s/--threads=8/--threads=${NVCC_THREADS}/" /tmp/sageattention/setup.py; \
+        pip install packaging ninja; \
+        CUDA_HOME=/usr/local/cuda-12.8 TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" MAX_JOBS="$MAX_JOBS" \
+            pip install --no-build-isolation /tmp/sageattention; \
+        rm -rf /tmp/sageattention; \
+    elif [ "$ATTENTION" = "flash" ]; then \
+        pip install "$FLASH_ATTN_WHEEL"; \
+    elif [ "$ATTENTION" != "none" ]; then \
+        echo "ATTENTION must be sage, flash or none, not '$ATTENTION'" >&2; exit 1; \
+    fi
 
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt \

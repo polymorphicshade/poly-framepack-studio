@@ -56,11 +56,13 @@ try:
 except:
     pass
 
-# SageAttention 2 only has kernels for Ampere (sm80) and newer. On older GPUs it imports fine but
-# fails on the first call, so fall back to the next backend instead.
-if sageattn is not None and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
+# SageAttention 2 and Flash Attention 2 only have kernels for Ampere (sm80) and newer. On older GPUs
+# they import fine but fail on the first call, so fall back to the next backend instead.
+if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
     sageattn_varlen = None
     sageattn = None
+    flash_attn_varlen_func = None
+    flash_attn_func = None
 
 # --- Attention Summary ---
 print("\n--- Attention Configuration ---")
