@@ -16,7 +16,7 @@ ARG TORCHVISION_VERSION=0.22.1
 # Attention backend: "sage" (fastest; compiled from source, as there are no Linux wheels), "flash"
 # (a prebuilt flash-attn wheel, no compiling) or "none" (PyTorch's own attention). Both need an
 # Ampere (RTX 30-series) or newer GPU; older GPUs fall back to PyTorch's attention.
-ARG ATTENTION=sage
+ARG ATTENTION=flash
 # GPU architectures SageAttention is compiled for: Ampere (8.0, 8.6), Ada (8.9), Hopper (9.0) and
 # Blackwell (12.0). Listing only your own GPUs (e.g. "8.6;8.9") builds faster.
 ARG TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0"
