@@ -598,7 +598,7 @@ def create_interface(
                             elem_classes="contain-image",
                             image_mode="RGB"
                         )
-                        result_video = gr.Video(label="Finished Frames", autoplay=True, show_share_button=False, height=256, loop=True)
+                        result_video = gr.Video(label="Finished Frames", autoplay=True, show_share_button=False, show_download_button=True, height=256, loop=True)
                         with gr.Row():
                             download_last_frame_btn = gr.DownloadButton("💾 Download Last Frame", interactive=False, size="sm")
                             use_last_frame_btn = gr.Button("➡️ Use Last Frame as Input", interactive=False, size="sm")
