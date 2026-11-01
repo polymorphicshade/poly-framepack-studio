@@ -273,11 +273,17 @@ def save_bcthw_as_mp4(x, output_filename, fps=10, crf=0):
             break
 
     os.makedirs(os.path.dirname(os.path.abspath(os.path.realpath(output_filename))), exist_ok=True)
-    x = torch.clamp(x.float(), -1., 1.) * 127.5 + 127.5
-    x = x.detach().cpu().to(torch.uint8)
-    x = einops.rearrange(x, '(m n) c t h w -> t (m h) (n w) c', n=per_row)
-    torchvision.io.write_video(output_filename, x, fps=fps, video_codec='libx264', options={'crf': str(int(crf))})
-    return x
+
+    # Convert to uint8 a few frames at a time. Converting the whole video at once made several
+    # full-length float32 copies, which ran long videos out of system RAM.
+    frames = torch.empty((t, (b // per_row) * h, per_row * w, c), dtype=torch.uint8)
+    for start in range(0, t, 16):
+        chunk = x[:, :, start:start + 16].detach().cpu()
+        chunk = (torch.clamp(chunk.float(), -1., 1.) * 127.5 + 127.5).to(torch.uint8)
+        frames[start:start + 16] = einops.rearrange(chunk, '(m n) c t h w -> t (m h) (n w) c', n=per_row)
+
+    torchvision.io.write_video(output_filename, frames, fps=fps, video_codec='libx264', options={'crf': str(int(crf))})
+    return frames
 
 
 def save_bcthw_as_png(x, output_filename):
